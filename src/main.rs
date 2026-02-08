@@ -58,7 +58,11 @@ mod sbi;
 mod x86_64_svm;
 
 // ────────────────── Common modules ──────────────────
+// Loader module for loading guest binaries into an AddrSpace.
+// Currently all architectures use inline loading, but this module is
+// preserved as a reusable utility.
 #[cfg(feature = "axstd")]
+#[allow(dead_code)]
 mod loader;
 
 // VM entry point (guest physical / intermediate-physical address)
@@ -562,10 +566,10 @@ fn aarch64_main() {
     }
 
     // ── 3. Get physical address of the trampoline ──
-    extern "C" {
+    unsafe extern "C" {
         fn _aarch64_guest_trampoline();
     }
-    let trampoline_va = _aarch64_guest_trampoline as usize;
+    let trampoline_va = _aarch64_guest_trampoline as *const () as usize;
     let trampoline_pa = usize::from(virt_to_phys(trampoline_va.into()));
     let trampoline_page_pa = trampoline_pa & !0xFFF;
     ax_println!(
@@ -576,8 +580,9 @@ fn aarch64_main() {
     // ── 4. Create identity mapping for trampoline page in TTBR0 ──
     // The trampoline must be at an identity-mapped address (VA = PA) so
     // that it can disable MMU without the instruction stream becoming invalid.
-    let flags = MappingFlags::READ | MappingFlags::WRITE
-        | MappingFlags::EXECUTE | MappingFlags::USER;
+    // NOTE: Do NOT set USER flag — the trampoline runs at EL1, and the USER
+    // flag would set PXN (Privileged eXecute Never), blocking EL1 execution.
+    let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE;
 
     let mut identity = axmm::AddrSpace::new_empty(va!(0x0), 0x4800_0000).unwrap();
     identity.map_linear(
