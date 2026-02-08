@@ -54,8 +54,17 @@ pub const INTERCEPT_VMMCALL: u32 = 1 << 1;
 /// Bit in CTRL_INTERCEPT_MISC2 for HLT intercept.
 pub const INTERCEPT_HLT: u32 = 1 << 24;
 
+// ── Intercept bits for CTRL_INTERCEPT_MISC1 ────────────────────
+/// Bit in CTRL_INTERCEPT_MISC1 for INTR intercept.
+pub const INTERCEPT_INTR: u32 = 1 << 0;
+/// Bit in CTRL_INTERCEPT_MISC1 for MSR protection (MSRPM-based intercept).
+pub const INTERCEPT_MSR_PROT: u32 = 1 << 28;
+
 // ── VMEXIT codes ────────────────────────────────────────────────
+pub const VMEXIT_INTR: u64 = 0x60;
 pub const VMEXIT_HLT: u64 = 0x78;
+pub const VMEXIT_MSR: u64 = 0x7C;
+pub const VMEXIT_SHUTDOWN: u64 = 0x7F;
 pub const VMEXIT_VMMCALL: u64 = 0x81;
 pub const VMEXIT_NPF: u64 = 0x400;
 pub const VMEXIT_INVALID: u64 = u64::MAX; // -1

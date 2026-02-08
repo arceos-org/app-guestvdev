@@ -72,8 +72,9 @@ const VM_ENTRY: usize = 0x8020_0000;
 #[cfg(all(feature = "axstd", target_arch = "aarch64"))]
 const VM_ENTRY: usize = 0x4420_0000;
 
+// For x86_64 with axstd: ArceOS guest kernel-base-paddr = 0x200000
 #[cfg(all(feature = "axstd", target_arch = "x86_64"))]
-const VM_ENTRY: usize = 0x10000;
+const VM_ENTRY: usize = 0x20_0000;
 
 #[cfg(all(
     feature = "axstd",
@@ -633,17 +634,26 @@ fn aarch64_main() {
 }
 
 // ════════════════════════════════════════════════════════════════
-//  x86_64  (AMD SVM hypervisor — long-mode guest with NPT)
+//  x86_64  (AMD SVM hypervisor — full ArceOS guest via Multiboot boot)
 //
-//  The guest runs in 64-bit long mode inside an SVM container.
-//  The hypervisor creates initial page tables, GDT, and VMCB for
-//  the guest, then uses VMRUN to execute it.
+//  The guest ArceOS binary boots via the Multiboot protocol:
+//    1. VMCB starts the guest in 32-bit protected mode (no paging)
+//    2. Guest boot assembly (multiboot.S) transitions to 64-bit long mode:
+//       a. Loads its own GDT
+//       b. Sets up 1GB-huge-page identity mapping (+ high-VA mapping)
+//       c. Enables PAE, LME, PG → enters long mode
+//    3. ArceOS initializes: IDT, APIC timer, serial console, scheduler
+//    4. Guest runs the u_6_0 multitask demo with CFS preemptive scheduling
+//    5. Guest calls VMMCALL to shut down
 //
-//  Nested Page Tables (NPT) provide GPA→HPA translation.
-//  Guest page tables provide GVA→GPA translation.
+//  Hardware passthrough via NPT + IOPM:
+//    - APIC timer: mapped in NPT → guest programs it directly for scheduling
+//    - Serial port: IOPM allows I/O port 0x3F8 → guest writes directly
+//    - IOAPIC: mapped in NPT → guest initializes interrupts
+//    - No INTR intercept → timer interrupts go directly to the guest
 //
-//  VMMCALL hypercalls are used for console I/O and shutdown.
-//  NPF (Nested Page Fault) is used for pflash emulation.
+//  VMMCALL is intercepted for guest shutdown.
+//  NPF allocates zeroed pages for unmapped regions.
 // ════════════════════════════════════════════════════════════════
 
 #[cfg(all(feature = "axstd", target_arch = "x86_64"))]
@@ -653,6 +663,7 @@ fn x86_64_main() {
     use x86_64_svm::vmcb::*;
     use x86_64_svm::svm::*;
     use memory_addr::va;
+    use axhal::mem::{phys_to_virt, PhysAddr};
     use axhal::paging::{MappingFlags, PageSize};
     use axmm::backend::{Backend, SharedPages};
     use memory_addr::PAGE_SIZE_4K;
@@ -683,13 +694,22 @@ fn x86_64_main() {
     let host_vmcb = Box::new(Page4K([0u8; 4096]));
     let host_vmcb_pa = virt_to_phys_ptr(&host_vmcb.0[0]);
 
-    // ── 4. Allocate IOPM and MSRPM ──
+    // ── 4. Allocate IOPM and MSRPM (all zeros = allow all I/O ports and MSRs) ──
     #[repr(C, align(4096))]
     struct Iopm([u8; 12288]);
     #[repr(C, align(4096))]
     struct Msrpm([u8; 8192]);
     let iopm = Box::new(Iopm([0u8; 12288]));
-    let msrpm = Box::new(Msrpm([0u8; 8192]));
+    // MSRPM: intercept EFER (MSR 0xC000_0080) writes to keep SVME set.
+    // Without this, the guest's boot code clears SVME when writing LME|NXE
+    // to EFER, which causes VMMCALL to trigger #UD later.
+    //
+    // MSRPM layout: Range0 (2048B, MSRs 0-0x1FFF) | Range1 (2048B, MSRs 0xC0000000-0xC0001FFF) | ...
+    // EFER (0xC0000080) is at Range1 offset (0x80 * 2 bits) = 256 bits = byte 32, bit 0 (read), bit 1 (write)
+    // Total byte offset in MSRPM: 2048 + 32 = 2080, write intercept = bit 1
+    let mut msrpm_data = [0u8; 8192];
+    msrpm_data[2080] |= 0x02; // Intercept EFER writes
+    let msrpm = Box::new(Msrpm(msrpm_data));
     let iopm_pa = virt_to_phys_ptr(&iopm.0[0]);
     let msrpm_pa = virt_to_phys_ptr(&msrpm.0[0]);
 
@@ -699,8 +719,9 @@ fn x86_64_main() {
     let flags = MappingFlags::READ | MappingFlags::WRITE
         | MappingFlags::EXECUTE | MappingFlags::USER;
 
-    const GUEST_RAM_SIZE: usize = 0x20_0000; // 2MB
-    ax_println!("Pre-allocating {} KB guest RAM at GPA 0x0...", GUEST_RAM_SIZE / 1024);
+    // Pre-allocate 32MB of guest RAM (matching guest config phys-memory-size)
+    const GUEST_RAM_SIZE: usize = 0x200_0000; // 32MB
+    ax_println!("Pre-allocating {} MB guest RAM at GPA 0x0...", GUEST_RAM_SIZE / (1024 * 1024));
     let ram_pages = Arc::new(
         SharedPages::new(GUEST_RAM_SIZE, PageSize::Size4K)
             .expect("alloc guest RAM"),
@@ -713,37 +734,42 @@ fn x86_64_main() {
         Backend::new_shared(0x0usize.into(), ram_pages),
     ).expect("map guest RAM");
 
-    // ── 6. Write guest page tables into NPT-mapped memory ──
-    const PTE_PRESENT: u64 = 1;
-    const PTE_RW: u64 = 1 << 1;
-    const PTE_USER: u64 = 1 << 2;
-    const PTE_PS: u64 = 1 << 7;
-    const PT_FLAGS: u64 = PTE_PRESENT | PTE_RW | PTE_USER;
+    // Map APIC MMIO (GPA 0xFEE00000 → HPA 0xFEE00000, identity)
+    // Required for the guest to program the APIC timer for preemptive scheduling.
+    ax_println!("Mapping APIC at GPA 0xFEE00000 (identity)...");
+    npt.map_linear(
+        0xFEE0_0000usize.into(),
+        PhysAddr::from(0xFEE0_0000usize),
+        PAGE_SIZE_4K,
+        flags,
+    ).expect("map APIC");
 
-    npt.write(0x1000usize.into(), &(0x2000u64 | PT_FLAGS).to_le_bytes())
-        .expect("write PML4");
-    npt.write(0x2000usize.into(), &(0x3000u64 | PT_FLAGS).to_le_bytes())
-        .expect("write PDPT[0]");
-    npt.write((0x2000 + 3 * 8usize).into(), &(0x4000u64 | PT_FLAGS).to_le_bytes())
-        .expect("write PDPT[3]");
-    npt.write(0x3000usize.into(), &(0x0u64 | PT_FLAGS | PTE_PS).to_le_bytes())
-        .expect("write PD0[0]");
-    npt.write((0x4000 + 510 * 8usize).into(), &(0xFFC0_0000u64 | PT_FLAGS | PTE_PS).to_le_bytes())
-        .expect("write PD3[510]");
+    // Map IOAPIC MMIO (GPA 0xFEC00000 → HPA 0xFEC00000, identity)
+    ax_println!("Mapping IOAPIC at GPA 0xFEC00000 (identity)...");
+    npt.map_linear(
+        0xFEC0_0000usize.into(),
+        PhysAddr::from(0xFEC0_0000usize),
+        PAGE_SIZE_4K,
+        flags,
+    ).expect("map IOAPIC");
 
-    // ── 7. Write GDT into guest memory (GPA 0x5000) ──
+    // ── 6. Write initial GDT into guest memory (GPA 0x5000) ──
+    // This matches the format in ArceOS multiboot.S:
+    //   [0] null  [1] 32-bit code  [2] 64-bit code  [3] data
+    // The boot code immediately loads its own GDT, so this is only
+    // used for the first few instructions.
     let gdt: [u64; 4] = [
-        0x0000_0000_0000_0000, // null
-        0x00CF_9B00_0000_FFFF, // 32-bit code
-        0x00AF_9B00_0000_FFFF, // 64-bit code
-        0x00CF_9300_0000_FFFF, // data
+        0x0000_0000_0000_0000, // 0x00: null
+        0x00CF_9B00_0000_FFFF, // 0x08: 32-bit code (base=0, limit=4G, DPL=0)
+        0x00AF_9B00_0000_FFFF, // 0x10: 64-bit code (base=0, limit=4G, DPL=0)
+        0x00CF_9300_0000_FFFF, // 0x18: data        (base=0, limit=4G, DPL=0)
     ];
     for (i, &entry) in gdt.iter().enumerate() {
         npt.write((0x5000 + i * 8).into(), &entry.to_le_bytes())
             .expect("write GDT");
     }
 
-    // ── 8. Load guest binary at GPA VM_ENTRY (0x10000) ──
+    // ── 7. Load guest binary at GPA VM_ENTRY (0x200000 = kernel-base-paddr) ──
     {
         let fname = "/sbin/gkernel";
         ax_println!("VM created success, loading images...");
@@ -771,46 +797,147 @@ fn x86_64_main() {
 
     let npt_root_pa: u64 = usize::from(npt.page_table_root()) as u64;
 
-    // ── 9. Build VMCB for 64-bit long mode ──
+    // ── 8. Build VMCB for 32-bit protected mode (Multiboot-compatible) ──
+    //
+    // Initial state emulates a Multiboot-compliant bootloader:
+    //   - 32-bit protected mode, paging disabled
+    //   - EAX = 0x2BADB002 (Multiboot magic)
+    //   - EBX = 0 (no MBI structure — guest uses built-in platform config)
+    //   - Flat CS/DS/SS segments (base=0, limit=4G)
+    //
+    // The guest boot code (multiboot.S) will:
+    //   1. Load its own GDT and page tables
+    //   2. Enable PAE, LME, PG → transition to 64-bit long mode
+    //   3. Call rust_entry(magic, mbi)
     let mut vmcb = Box::new(Vmcb::new());
 
+    // Intercept VMRUN (required) and VMMCALL (for guest shutdown).
+    // Do NOT intercept INTR — timer interrupts go directly to the guest
+    // for preemptive scheduling (APIC timer is passthrough via NPT).
     vmcb.write_u32(CTRL_INTERCEPT_MISC2, INTERCEPT_VMRUN | INTERCEPT_VMMCALL);
+    // Enable MSR protection so MSRPM-based intercepts (EFER writes) are active.
+    vmcb.write_u32(CTRL_INTERCEPT_MISC1, INTERCEPT_MSR_PROT);
     vmcb.write_u64(CTRL_IOPM_BASE, iopm_pa);
     vmcb.write_u64(CTRL_MSRPM_BASE, msrpm_pa);
     vmcb.write_u32(CTRL_GUEST_ASID, 1);
     vmcb.write_u64(CTRL_NP_ENABLE, 1);
     vmcb.write_u64(CTRL_NCR3, npt_root_pa);
 
-    vmcb.set_segment(SAVE_CS, 0x10, 0x0A9B, 0xFFFF_FFFF, 0);
+    // Segment registers: 32-bit flat segments for Multiboot boot
+    // CS: selector=0x08 → GDT[1] (32-bit code), attr=0x0C9B (G=1,D/B=1,L=0,P=1,DPL=0,Code E/R)
+    vmcb.set_segment(SAVE_CS, 0x08, 0x0C9B, 0xFFFF_FFFF, 0);
+    // DS/ES/SS: selector=0x18 → GDT[3] (data), attr=0x0C93 (G=1,D/B=1,L=0,P=1,DPL=0,Data R/W)
     vmcb.set_segment(SAVE_DS, 0x18, 0x0C93, 0xFFFF_FFFF, 0);
     vmcb.set_segment(SAVE_ES, 0x18, 0x0C93, 0xFFFF_FFFF, 0);
     vmcb.set_segment(SAVE_SS, 0x18, 0x0C93, 0xFFFF_FFFF, 0);
     vmcb.set_segment(SAVE_FS, 0, 0, 0, 0);
     vmcb.set_segment(SAVE_GS, 0, 0, 0, 0);
+    // GDTR: point to our initial GDT at GPA 0x5000 (4 entries × 8 bytes = 32, limit=31)
     vmcb.set_segment(SAVE_GDTR, 0, 0, 31, 0x5000);
-    vmcb.set_segment(SAVE_IDTR, 0, 0, 0xFFF, 0);
+    // IDTR: empty (guest sets up its own IDT during boot)
+    vmcb.set_segment(SAVE_IDTR, 0, 0, 0, 0);
+    // TR and LDTR: minimal valid state
     vmcb.set_segment(SAVE_TR, 0, 0x008B, 0x67, 0);
     vmcb.set_segment(SAVE_LDTR, 0, 0x0082, 0, 0);
 
-    vmcb.write_u64(SAVE_CR0, 0x8001_0011);
-    vmcb.write_u64(SAVE_CR3, 0x1000);
-    vmcb.write_u64(SAVE_CR4, 0x00A0);
-    vmcb.write_u64(SAVE_EFER, EFER_SVME | (1 << 8) | (1 << 10) | (1 << 11));
+    // CR0: Protected mode, NO paging (guest boot code enables paging)
+    // PE=1(bit0), MP=1(bit1)... actually just PE + NE for 32-bit PM
+    vmcb.write_u64(SAVE_CR0, 0x0000_0011); // PE | NE
+    // CR3: 0 — no paging yet, guest boot code sets CR3
+    vmcb.write_u64(SAVE_CR3, 0);
+    // CR4: 0 — guest boot code enables PAE, PGE
+    vmcb.write_u64(SAVE_CR4, 0);
+    // EFER: SVME only (required by some SVM implementations for guest EFER validation)
+    // Guest boot code will add LME + NXE via WRMSR
+    vmcb.write_u64(SAVE_EFER, EFER_SVME);
 
     vmcb.write_u64(SAVE_DR6, 0xFFFF_0FF0);
     vmcb.write_u64(SAVE_DR7, 0x0400);
+    // RFLAGS: reserved bit 1 set, IF=0 (interrupts disabled during boot)
     vmcb.write_u64(SAVE_RFLAGS, 0x2);
+    // RIP: guest entry point = kernel-base-paddr (0x200000)
     vmcb.write_u64(SAVE_RIP, VM_ENTRY as u64);
+    // RSP: temporary stack within NPT-mapped RAM
     vmcb.write_u64(SAVE_RSP, 0x80000);
+    // RAX: Multiboot bootloader magic (boot code checks this)
+    vmcb.write_u64(SAVE_RAX, 0x2BADB002);
 
     let vmcb_pa = virt_to_phys_ptr(&vmcb.data[0]);
 
-    // ── 10. Create guest GPR save area ──
-    let mut gprs = SvmGuestGprs::new();
+    // ── 8b. Write Multiboot Information structure at GPA 0x6000 ──
+    // ArceOS reads the MBI to determine available physical memory regions.
+    // We provide a minimal MBI with a memory map matching the guest config
+    // (phys-memory-size = 0x200_0000 = 32MB).
+    {
+        const MBI_ADDR: usize = 0x6000;
+        const MMAP_ADDR: usize = MBI_ADDR + 64; // memory map starts after MBI header
 
-    // ── 11. Run guest in loop ──
-    ax_println!("Entering VM run loop...");
+        // MBI header (Multiboot Information structure, 52+ bytes)
+        // Offset 0:  flags      — bit 0 (mem info), bit 6 (mmap valid)
+        // Offset 4:  mem_lower  — KB of lower memory (below 1MB)
+        // Offset 8:  mem_upper  — KB of upper memory (above 1MB)
+        // Offset 44: mmap_length — total size of memory map entries
+        // Offset 48: mmap_addr  — physical address of memory map
+        let mut mbi = [0u8; 64];
+        // flags = (1 << 0) | (1 << 6) = 0x41
+        mbi[0..4].copy_from_slice(&0x41u32.to_le_bytes());
+        // mem_lower = 640 (KB, conventional memory)
+        mbi[4..8].copy_from_slice(&640u32.to_le_bytes());
+        // mem_upper = 31 * 1024 (KB, 31MB above 1MB = 32MB - 1MB)
+        mbi[8..12].copy_from_slice(&(31u32 * 1024).to_le_bytes());
+        // mmap_length = 24 (one entry: 4 bytes size + 20 bytes data)
+        mbi[44..48].copy_from_slice(&24u32.to_le_bytes());
+        // mmap_addr = MMAP_ADDR
+        mbi[48..52].copy_from_slice(&(MMAP_ADDR as u32).to_le_bytes());
+        npt.write(MBI_ADDR.into(), &mbi).expect("write MBI");
+
+        // Memory map entry (Multiboot memory map format):
+        //   uint32_t size = 20 (size of the rest of this entry)
+        //   uint64_t base_addr = 0
+        //   uint64_t length = 0x200_0000 (32MB)
+        //   uint32_t type = 1 (available)
+        let mut mmap_entry = [0u8; 24];
+        mmap_entry[0..4].copy_from_slice(&20u32.to_le_bytes()); // size
+        mmap_entry[4..12].copy_from_slice(&0u64.to_le_bytes()); // base_addr = 0
+        mmap_entry[12..20].copy_from_slice(&(GUEST_RAM_SIZE as u64).to_le_bytes()); // length = 32MB
+        mmap_entry[20..24].copy_from_slice(&1u32.to_le_bytes()); // type = Available
+        npt.write(MMAP_ADDR.into(), &mmap_entry).expect("write mmap entry");
+
+        ax_println!("MBI at GPA {:#x}, mmap at GPA {:#x} (32MB available)", MBI_ADDR, MMAP_ADDR);
+    }
+
+    // ── 9. Create guest GPR save area ──
+    let mut gprs = SvmGuestGprs::new();
+    // RBX = MBI address (boot code saves EBX→ESI for rust_entry's mbi parameter)
+    gprs.rbx = 0x6000;
+
+    // ── 10. Mask host APIC timer before entering guest ──
+    // The guest will program its own APIC timer during boot.
+    // We mask the host's timer to prevent stale interrupts from being
+    // delivered to the guest before its IDT is set up.
+    {
+        let apic_va = phys_to_virt(PhysAddr::from(0xFEE0_0000usize)).as_usize();
+        unsafe {
+            // Stop the timer: set initial count to 0
+            core::ptr::write_volatile((apic_va + 0x380) as *mut u32, 0);
+            // Mask the timer LVT entry (bit 16 = mask)
+            let lvt = core::ptr::read_volatile((apic_va + 0x320) as *const u32);
+            core::ptr::write_volatile((apic_va + 0x320) as *mut u32, lvt | (1 << 16));
+            // Send EOI for any pending interrupt
+            core::ptr::write_volatile((apic_va + 0x0B0) as *mut u32, 0);
+        }
+        // Briefly enable interrupts to clear any pending timer interrupt
+        unsafe { core::arch::asm!("sti; nop; nop; nop; cli"); }
+        ax_println!("Host APIC timer masked");
+    }
+
+    // ── 11. Run guest in VM loop ──
+    ax_println!("Entering VM run loop (32-bit Multiboot boot → 64-bit ArceOS)...");
     loop {
+        // Ensure SVME is set in guest EFER (may be cleared by guest's WRMSR to EFER)
+        let efer = vmcb.read_u64(SAVE_EFER);
+        vmcb.write_u64(SAVE_EFER, efer | EFER_SVME);
+
         unsafe {
             _run_guest(vmcb_pa, host_vmcb_pa, &mut gprs);
         }
@@ -820,17 +947,18 @@ fn x86_64_main() {
         match exit_code {
             VMEXIT_VMMCALL => {
                 let guest_rax = vmcb.guest_rax();
-                let func = guest_rax & 0xFF;
 
                 if guest_rax == 0x84000008 {
+                    // Guest shutdown (PSCI SYSTEM_OFF convention via VMMCALL)
                     ax_println!("Shutdown vm normally!");
                     break;
-                } else if func == 1 {
-                    let ch = ((guest_rax >> 8) & 0xFF) as u8;
-                    ax_print!("{}", ch as char);
-                    let rip = vmcb.guest_rip();
-                    vmcb.write_u64(SAVE_RIP, rip + 3);
                 } else {
+                    // Legacy putchar or unknown VMMCALL — advance RIP past 3-byte instruction
+                    let func = guest_rax & 0xFF;
+                    if func == 1 {
+                        let ch = ((guest_rax >> 8) & 0xFF) as u8;
+                        ax_print!("{}", ch as char);
+                    }
                     let rip = vmcb.guest_rip();
                     vmcb.write_u64(SAVE_RIP, rip + 3);
                 }
@@ -839,24 +967,50 @@ fn x86_64_main() {
                 let fault_addr = vmcb.exit_info2();
                 let page_addr = (fault_addr & !0xFFF) as usize;
 
-                let is_pflash = page_addr >= 0xFFC0_0000 && page_addr < 0x1_0000_0000;
-
+                // For MMIO regions that need identity mapping (APIC, IOAPIC),
+                // we pre-mapped them above. Any other NPF is handled by
+                // allocating zeroed pages — this allows PCI probing to
+                // read all-zeros (no devices), preventing VirtIO conflicts.
                 let pages = Arc::new(
                     SharedPages::new(PAGE_SIZE_4K, PageSize::Size4K)
                         .expect("alloc page for NPF"),
                 );
-                npt.map(
+                let _ = npt.map(
                     page_addr.into(),
                     PAGE_SIZE_4K,
                     flags,
                     true,
                     Backend::new_shared(page_addr.into(), pages),
-                ).expect("map NPF page");
+                );
+            }
+            VMEXIT_MSR => {
+                // MSR intercept — we only intercept EFER writes.
+                // EXITINFO1: 0 = RDMSR, 1 = WRMSR
+                let is_write = vmcb.exit_info1() == 1;
+                let msr_num = gprs.rcx as u32;
 
-                if is_pflash {
-                    npt.write(page_addr.into(), &0x646c6670u32.to_le_bytes())
-                        .expect("write pflash magic");
+                if is_write && msr_num == MSR_EFER {
+                    // Guest is writing to EFER (typically setting LME | NXE).
+                    // Emulate the write but force SVME to stay set so that
+                    // VMMCALL remains usable for guest shutdown.
+                    let eax = vmcb.guest_rax() as u32;
+                    let edx = gprs.rdx as u32;
+                    let new_efer = ((edx as u64) << 32) | (eax as u64);
+                    vmcb.write_u64(SAVE_EFER, new_efer | EFER_SVME);
                 }
+                // Advance RIP past the 2-byte WRMSR/RDMSR instruction (0F 30 / 0F 32)
+                let rip = vmcb.guest_rip();
+                vmcb.write_u64(SAVE_RIP, rip + 2);
+            }
+            VMEXIT_SHUTDOWN => {
+                // Triple fault — usually indicates a crash during boot
+                ax_println!(
+                    "Guest SHUTDOWN (triple fault): RIP={:#x}, info1={:#x}, info2={:#x}",
+                    vmcb.guest_rip(),
+                    vmcb.exit_info1(),
+                    vmcb.exit_info2(),
+                );
+                break;
             }
             _ => {
                 ax_println!(
@@ -871,8 +1025,9 @@ fn x86_64_main() {
         }
     }
 
+    // ── 12. Shutdown QEMU ──
     ax_println!("Hypervisor ok!");
-
+    // Write 0x2000 to ACPI shutdown port (QEMU-specific)
     unsafe {
         core::arch::asm!(
             "mov dx, 0x604",

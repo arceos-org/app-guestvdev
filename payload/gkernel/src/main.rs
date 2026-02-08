@@ -8,16 +8,18 @@
 //!   The hypervisor uses a bootloader approach (EL1 handoff) — guest has
 //!   direct hardware access for timer, UART, and GIC.
 //!   Falls back to bare-metal EL0 mode if axstd is not enabled.
-//! - **x86_64**: Bare-metal long-mode program using VMMCALL hypercalls.
-//!   Demonstrates virtual device interaction (console I/O via hypercalls,
-//!   PFlash read via NPF).
+//! - **x86_64**: Full ArceOS app using `axstd` with multitasking (when axstd enabled).
+//!   Runs the same preemptive multi-task demo with CFS scheduler.
+//!   The hypervisor uses SVM with hardware passthrough — guest has direct
+//!   access to APIC timer, serial port, and I/O ports via NPT + IOPM.
+//!   Falls back to bare-metal long-mode VMMCALL demo if axstd is not enabled.
 
 #![no_std]
 #![no_main]
 
 // ══════════════════════════════════════════════════════════════
 //  Full ArceOS guest with multitasking (u_6_0 style)
-//  Used by: riscv64, aarch64 (when axstd feature is enabled)
+//  Used by: riscv64, aarch64, x86_64 (when axstd feature is enabled)
 //
 //  This guest exercises virtual device / hardware support:
 //  - Timer (for preemptive scheduling via CFS)
@@ -25,11 +27,11 @@
 //  - Preemptive scheduling (CFS scheduler with timer interrupts)
 // ══════════════════════════════════════════════════════════════
 
-#[cfg(all(feature = "axstd", any(target_arch = "riscv64", target_arch = "aarch64")))]
+#[cfg(all(feature = "axstd", any(target_arch = "riscv64", target_arch = "aarch64", target_arch = "x86_64")))]
 #[macro_use]
 extern crate axstd as std;
 
-#[cfg(all(feature = "axstd", any(target_arch = "riscv64", target_arch = "aarch64")))]
+#[cfg(all(feature = "axstd", any(target_arch = "riscv64", target_arch = "aarch64", target_arch = "x86_64")))]
 mod multitask_guest {
     use std::collections::VecDeque;
     use std::os::arceos::modules::axsync::spin::SpinNoIrq;
@@ -78,7 +80,7 @@ mod multitask_guest {
     }
 }
 
-#[cfg(all(feature = "axstd", any(target_arch = "riscv64", target_arch = "aarch64")))]
+#[cfg(all(feature = "axstd", any(target_arch = "riscv64", target_arch = "aarch64", target_arch = "x86_64")))]
 #[unsafe(no_mangle)]
 fn main() {
     multitask_guest::run();
@@ -96,6 +98,17 @@ fn main() {
             "movk x0, #0x8400, lsl #16",   // x0 = 0x84000008 (PSCI_SYSTEM_OFF)
             "smc  #0",
             options(noreturn)
+        );
+    }
+
+    // On x86_64 (SVM mode), the guest runs inside an AMD SVM container.
+    // Use VMMCALL to signal shutdown to the hypervisor.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "vmmcall",
+            in("rax") 0x84000008u64,
+            options(noreturn, nomem, nostack),
         );
     }
 }
@@ -196,6 +209,7 @@ mod aarch64_guest {
 
 // ══════════════════════════════════════════════════════════════
 //  x86_64 — Bare-metal long-mode guest, VMMCALL hypercalls
+//  (fallback when axstd is NOT enabled)
 //
 //  Hypercall ABI (VMMCALL):
 //    rax encoding:
@@ -207,10 +221,10 @@ mod aarch64_guest {
 //  - PFlash read via NPF (virtual pflash device)
 // ══════════════════════════════════════════════════════════════
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(not(feature = "axstd"), target_arch = "x86_64"))]
 const PFLASH_START: usize = 0xFFC0_0000;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(not(feature = "axstd"), target_arch = "x86_64"))]
 mod x86_64_guest {
     use super::PFLASH_START;
 
@@ -294,7 +308,7 @@ mod x86_64_guest {
 
 #[cfg(any(
     all(not(feature = "axstd"), target_arch = "aarch64"),
-    target_arch = "x86_64"
+    all(not(feature = "axstd"), target_arch = "x86_64"),
 ))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
