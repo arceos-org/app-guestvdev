@@ -76,4 +76,6 @@ phys-memory-size = 0x400_0000 # uint
 # addresses.
 phys-virt-offset = "0xffff_0000_0000_0000" # uint
 # PSCI
-psci-method = "hvc" # str
+# With `-machine virt,virtualization=on`, PSCI is handled at EL3 via SMC.
+# The EL2 stub does not forward HVC-based PSCI calls, so "smc" is required.
+psci-method = "smc" # str

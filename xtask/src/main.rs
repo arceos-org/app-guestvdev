@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
+use std::time::Duration;
 
 /// ArceOS Guest Virtual Device — multi-architecture build & run tool
 #[derive(Parser)]
@@ -404,15 +405,46 @@ fn do_run_qemu(arch: &str, elf: &Path, bin: &Path, disk: &Path, pflash: Option<&
     ]);
 
     println!("Running: {} {}", qemu, args.join(" "));
-    let status = Command::new(&qemu)
+
+    let timeout_secs = 20u64;
+    let mut child = Command::new(&qemu)
         .args(&args)
-        .status()
+        .spawn()
         .unwrap_or_else(|e| {
             eprintln!("Error: failed to run {}: {}", qemu, e);
             process::exit(1);
         });
-    if !status.success() {
-        process::exit(status.code().unwrap_or(1));
+
+    // Poll child every 200ms until it exits or timeout is reached.
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // QEMU exited on its own
+                if !status.success() {
+                    process::exit(status.code().unwrap_or(1));
+                }
+                return;
+            }
+            Ok(None) => {
+                // Still running
+                if std::time::Instant::now() >= deadline {
+                    eprintln!(
+                        "\nQEMU did not exit within {}s, killing...",
+                        timeout_secs
+                    );
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => {
+                eprintln!("Error: failed to wait for QEMU: {}", e);
+                let _ = child.kill();
+                process::exit(1);
+            }
+        }
     }
 }
 

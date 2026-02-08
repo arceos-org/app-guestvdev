@@ -82,6 +82,22 @@ mod multitask_guest {
 #[unsafe(no_mangle)]
 fn main() {
     multitask_guest::run();
+
+    // On AArch64 (bootloader mode), the guest has direct hardware access.
+    // Explicitly call PSCI SYSTEM_OFF to cleanly shut down QEMU.
+    //
+    // With `-machine virt,virtualization=on`, PSCI is handled at EL3 via SMC
+    // (the EL2 stub does not forward HVC-based PSCI calls).
+    // This matches the shutdown approach used by app-guestmode and app-guestaspace.
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!(
+            "movz x0, #0x0008",
+            "movk x0, #0x8400, lsl #16",   // x0 = 0x84000008 (PSCI_SYSTEM_OFF)
+            "smc  #0",
+            options(noreturn)
+        );
+    }
 }
 
 // ══════════════════════════════════════════════════════════════
