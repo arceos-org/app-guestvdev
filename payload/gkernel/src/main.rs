@@ -3,9 +3,11 @@
 //! - **riscv64**: Full ArceOS app using `axstd` with multitasking.
 //!   Runs a preemptive multi-task demo with CFS scheduler (u_6_0 style).
 //!   Requires timer virtualization from the hypervisor.
-//! - **aarch64**: Bare-metal EL0 program using SVC hypercalls.
-//!   Demonstrates virtual device interaction (console I/O via hypercalls,
-//!   PFlash read via NPF).
+//! - **aarch64**: Full ArceOS app using `axstd` with multitasking (when axstd enabled).
+//!   Runs the same preemptive multi-task demo with CFS scheduler.
+//!   The hypervisor uses a bootloader approach (EL1 handoff) — guest has
+//!   direct hardware access for timer, UART, and GIC.
+//!   Falls back to bare-metal EL0 mode if axstd is not enabled.
 //! - **x86_64**: Bare-metal long-mode program using VMMCALL hypercalls.
 //!   Demonstrates virtual device interaction (console I/O via hypercalls,
 //!   PFlash read via NPF).
@@ -14,24 +16,25 @@
 #![no_main]
 
 // ══════════════════════════════════════════════════════════════
-//  RISC-V 64 — Full ArceOS guest with multitasking (u_6_0 style)
+//  Full ArceOS guest with multitasking (u_6_0 style)
+//  Used by: riscv64, aarch64 (when axstd feature is enabled)
 //
-//  This guest exercises the hypervisor's virtual device support:
-//  - Timer virtualization (SBI SetTimer + hvip injection)
-//  - Console I/O (SBI PutChar)
+//  This guest exercises virtual device / hardware support:
+//  - Timer (for preemptive scheduling via CFS)
+//  - Console I/O (println!)
 //  - Preemptive scheduling (CFS scheduler with timer interrupts)
 // ══════════════════════════════════════════════════════════════
 
-#[cfg(all(feature = "axstd", target_arch = "riscv64"))]
+#[cfg(all(feature = "axstd", any(target_arch = "riscv64", target_arch = "aarch64")))]
 #[macro_use]
 extern crate axstd as std;
 
-#[cfg(all(feature = "axstd", target_arch = "riscv64"))]
-mod riscv64_guest {
-    use std::thread;
+#[cfg(all(feature = "axstd", any(target_arch = "riscv64", target_arch = "aarch64")))]
+mod multitask_guest {
     use std::collections::VecDeque;
-    use std::sync::Arc;
     use std::os::arceos::modules::axsync::spin::SpinNoIrq;
+    use std::sync::Arc;
+    use std::thread;
 
     const LOOP_NUM: usize = 256;
 
@@ -75,14 +78,14 @@ mod riscv64_guest {
     }
 }
 
-#[cfg(all(feature = "axstd", target_arch = "riscv64"))]
+#[cfg(all(feature = "axstd", any(target_arch = "riscv64", target_arch = "aarch64")))]
 #[unsafe(no_mangle)]
 fn main() {
-    riscv64_guest::run();
+    multitask_guest::run();
 }
 
 // ══════════════════════════════════════════════════════════════
-//  AArch64 — Bare-metal EL0 guest, SVC hypercalls
+//  AArch64 — Bare-metal EL0 guest (fallback when axstd is NOT enabled)
 //
 //  Hypercall ABI (SVC #0):
 //    x8 = function ID:
@@ -94,10 +97,10 @@ fn main() {
 //  - PFlash read via NPF (virtual pflash device)
 // ══════════════════════════════════════════════════════════════
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(not(feature = "axstd"), target_arch = "aarch64"))]
 const PFLASH_START: usize = 0x0400_0000;
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(not(feature = "axstd"), target_arch = "aarch64"))]
 mod aarch64_guest {
     use super::PFLASH_START;
 
@@ -269,10 +272,14 @@ mod x86_64_guest {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  Panic handler for bare-metal targets (aarch64, x86_64)
+//  Panic handler for bare-metal targets
+//  (only needed when axstd is NOT providing one)
 // ══════════════════════════════════════════════════════════════
 
-#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+#[cfg(any(
+    all(not(feature = "axstd"), target_arch = "aarch64"),
+    target_arch = "x86_64"
+))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {

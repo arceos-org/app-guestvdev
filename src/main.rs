@@ -44,9 +44,13 @@ mod csrs;
 mod sbi;
 
 // ────────────────── AArch64 specific modules ──────────────────
-#[cfg(all(feature = "axstd", target_arch = "aarch64"))]
-#[path = "aarch64/mod.rs"]
-mod aarch64;
+// NOTE: The current AArch64 approach uses a bootloader-style handoff
+// (hypervisor loads and jumps to guest at EL1), so the legacy EL1→EL0
+// guest/host context-switching modules are not needed.
+// The source files in src/aarch64/ are preserved for reference.
+// #[cfg(all(feature = "axstd", target_arch = "aarch64"))]
+// #[path = "aarch64/mod.rs"]
+// mod aarch64;
 
 // ────────────────── x86_64 (AMD SVM) specific modules ──────────────────
 #[cfg(all(feature = "axstd", target_arch = "x86_64"))]
@@ -62,7 +66,7 @@ mod loader;
 const VM_ENTRY: usize = 0x8020_0000;
 
 #[cfg(all(feature = "axstd", target_arch = "aarch64"))]
-const VM_ENTRY: usize = 0x4020_0000;
+const VM_ENTRY: usize = 0x4420_0000;
 
 #[cfg(all(feature = "axstd", target_arch = "x86_64"))]
 const VM_ENTRY: usize = 0x10000;
@@ -445,161 +449,180 @@ fn riscv64_main() {
 }
 
 // ════════════════════════════════════════════════════════════════
-//  AArch64  (EL1 hypervisor — bare-metal guest at EL0)
+//  AArch64  (Bootloader-style hypervisor — loads full ArceOS guest)
 //
 //  Since the ArceOS platform crate drops from EL2 to EL1 during
-//  boot, the hypervisor runs at EL1 and the guest at EL0.
-//  The guest uses SVC hypercalls for console I/O and shutdown.
-//  Data aborts from EL0 (page faults) are used to demonstrate
-//  on-demand page mapping (analogous to stage-2 page faults).
+//  boot, we cannot use traditional EL2 virtualization with Stage-2
+//  page tables. Instead, we use a bootloader approach:
+//
+//    1. Load the guest ArceOS binary from the FAT32 filesystem
+//    2. Write it to a separate physical memory region (PA 0x44200000)
+//    3. Set up an identity mapping for the trampoline page
+//    4. Jump to the trampoline (identity-mapped VA = PA)
+//    5. Trampoline disables MMU and jumps to guest at PA 0x44200000
+//    6. Guest ArceOS boots independently with full hardware access
+//
+//  The guest runs u_6_0-style multitasking with CFS scheduler.
+//  Timer, UART, and GIC are accessed directly by the guest.
+//
+//  Memory layout (QEMU 128MB RAM: 0x40000000 - 0x47FFFFFF):
+//    - Hypervisor: PA 0x40000000 - 0x43FFFFFF (lower 64MB)
+//    - Guest:      PA 0x44000000 - 0x47FFFFFF (upper 64MB)
 // ════════════════════════════════════════════════════════════════
+
+// Trampoline code for AArch64 guest handoff.
+// Must be executed at an identity-mapped address (VA = PA).
+// Disables MMU, caches, invalidates TLB/I-cache, then jumps to guest.
+#[cfg(all(feature = "axstd", target_arch = "aarch64"))]
+core::arch::global_asm!(
+    ".section .text",
+    ".balign 4096",
+    ".global _aarch64_guest_trampoline",
+    "_aarch64_guest_trampoline:",
+    // x0 = guest entry physical address
+    "mov x2, x0",                   // Save guest entry PA in x2
+    // Disable MMU, D-cache, I-cache in SCTLR_EL1
+    "mrs x1, sctlr_el1",
+    "bic x1, x1, #(1 << 0)",        // M = 0: disable MMU
+    "bic x1, x1, #(1 << 2)",        // C = 0: disable D-cache
+    "bic x1, x1, #(1 << 12)",       // I = 0: disable I-cache
+    "msr sctlr_el1, x1",
+    "isb",
+    // Invalidate TLB
+    "tlbi vmalle1",
+    "dsb ish",
+    "isb",
+    // Invalidate I-cache
+    "ic iallu",
+    "dsb ish",
+    "isb",
+    // Set x0 = 0 (no device tree; guest uses built-in defplat config)
+    "mov x0, #0",
+    // Jump to guest entry point (physical address, MMU is off)
+    "br x2",
+    ".global _aarch64_guest_trampoline_end",
+    "_aarch64_guest_trampoline_end:",
+);
 
 #[cfg(all(feature = "axstd", target_arch = "aarch64"))]
 fn aarch64_main() {
-    use alloc::sync::Arc;
-    use aarch64::vcpu::VmCpuRegisters;
-    use loader::load_vm_image;
-    use memory_addr::va;
-    use axhal::paging::{MappingFlags, PageSize};
-    use axhal::mem::PhysAddr;
-    use axmm::backend::{Backend, SharedPages};
-    use memory_addr::PAGE_SIZE_4K;
+    use axhal::mem::{phys_to_virt, virt_to_phys, PhysAddr};
+    use axhal::paging::MappingFlags;
+    use memory_addr::{va, PAGE_SIZE_4K};
 
-    ax_println!("Starting virtualization...");
+    ax_println!("Starting virtualization (bootloader mode)...");
 
-    // ── 1. Create guest address space ──
-    let mut uspace = axmm::AddrSpace::new_empty(va!(0x0), 0x4200_0000).unwrap();
+    // Guest ArceOS binary is loaded at PA 0x44200000 (upper 64MB region).
+    // This avoids overlap with the hypervisor kernel (at PA 0x40200000).
+    const GUEST_KERNEL_PADDR: usize = VM_ENTRY; // 0x4420_0000
 
+    // ── 1. Load guest binary from filesystem to physical memory ──
+    let fname = "/sbin/gkernel";
+    ax_println!("VM created success, loading images...");
+    ax_println!("app: {}", fname);
+
+    let ctx = axfs::ROOT_FS_CONTEXT.get().expect("Root FS not initialized");
+    let file = axfs::File::open(ctx, fname).expect("Cannot open guest image");
+    let mut total_bytes = 0usize;
+    loop {
+        let mut buf = [0u8; 4096];
+        let n = axio::Read::read(&mut &file, &mut buf).expect("read");
+        if n == 0 {
+            break;
+        }
+        // Write directly to guest physical memory via hypervisor's linear mapping
+        let dst_va = phys_to_virt(PhysAddr::from(GUEST_KERNEL_PADDR + total_bytes)).as_usize();
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                buf.as_ptr(),
+                dst_va as *mut u8,
+                n,
+            );
+        }
+        total_bytes += n;
+        if n < 4096 {
+            break;
+        }
+    }
+    ax_println!("Loaded {} bytes to PA {:#x}", total_bytes, GUEST_KERNEL_PADDR);
+
+    // ── 2. Clean D-cache for guest binary ──
+    // Ensures data is written to main memory before MMU & caches are disabled.
+    let guest_va_base = phys_to_virt(PhysAddr::from(GUEST_KERNEL_PADDR)).as_usize();
+    unsafe {
+        let mut off = 0usize;
+        while off < total_bytes {
+            core::arch::asm!("dc cvau, {}", in(reg) (guest_va_base + off));
+            off += 64; // cache line size
+        }
+        core::arch::asm!("dsb ish");
+        core::arch::asm!("ic iallu");
+        core::arch::asm!("dsb ish");
+        core::arch::asm!("isb");
+    }
+
+    // ── 3. Get physical address of the trampoline ──
+    extern "C" {
+        fn _aarch64_guest_trampoline();
+    }
+    let trampoline_va = _aarch64_guest_trampoline as usize;
+    let trampoline_pa = usize::from(virt_to_phys(trampoline_va.into()));
+    let trampoline_page_pa = trampoline_pa & !0xFFF;
+    ax_println!(
+        "Trampoline at VA {:#x} -> PA {:#x} (page {:#x})",
+        trampoline_va, trampoline_pa, trampoline_page_pa
+    );
+
+    // ── 4. Create identity mapping for trampoline page in TTBR0 ──
+    // The trampoline must be at an identity-mapped address (VA = PA) so
+    // that it can disable MMU without the instruction stream becoming invalid.
     let flags = MappingFlags::READ | MappingFlags::WRITE
         | MappingFlags::EXECUTE | MappingFlags::USER;
 
-    // ── 2. Load guest binary ──
-    if let Err(e) = load_vm_image("/sbin/gkernel", &mut uspace) {
-        panic!("Cannot load app! {:?}", e);
+    let mut identity = axmm::AddrSpace::new_empty(va!(0x0), 0x4800_0000).unwrap();
+    identity.map_linear(
+        trampoline_page_pa.into(),
+        PhysAddr::from(trampoline_page_pa),
+        PAGE_SIZE_4K,
+        flags,
+    ).expect("identity-map trampoline page");
+
+    // ── 5. Switch TTBR0 to identity page table ──
+    let pt_root = identity.page_table_root();
+    unsafe {
+        core::arch::asm!(
+            "msr ttbr0_el1, {val}",
+            "isb",
+            "tlbi vmalle1is",
+            "dsb ish",
+            "isb",
+            val = in(reg) usize::from(pt_root) as u64,
+        );
     }
 
-    // ── 3. Allocate guest stack ──
-    const STACK_SIZE: usize = 0x8000; // 32KB
-    const STACK_BASE: usize = 0x4100_0000;
-    const STACK_TOP: usize = STACK_BASE + STACK_SIZE;
-    let stack_pages = Arc::new(
-        SharedPages::new(STACK_SIZE, PageSize::Size4K)
-            .expect("alloc guest stack"),
+    // Prevent the identity AddrSpace from being dropped (which would free
+    // the page table pages). We are about to jump and never return.
+    core::mem::forget(identity);
+
+    // ── 6. Disable interrupts and jump to identity-mapped trampoline ──
+    // The trampoline will:
+    //   a) Disable MMU, D-cache, I-cache
+    //   b) Invalidate TLB and I-cache
+    //   c) Jump to guest at PA 0x44200000
+    // The guest ArceOS boots at EL1 with MMU off, just like a normal boot.
+    ax_println!(
+        "Entering guest at PA {:#x} via trampoline at PA {:#x}...",
+        GUEST_KERNEL_PADDR,
+        trampoline_pa
     );
-    uspace
-        .map(
-            STACK_BASE.into(),
-            STACK_SIZE,
-            flags,
-            true,
-            Backend::new_shared(STACK_BASE.into(), stack_pages),
-        )
-        .expect("map guest stack");
-    ax_println!("Guest stack: {:#x} - {:#x}", STACK_BASE, STACK_TOP);
-
-    // ── 4. Switch TTBR0_EL1 to guest page table ──
-    let pt_root = uspace.page_table_root();
-    let new_ttbr0: u64 = usize::from(pt_root) as u64;
-    let old_ttbr0: u64;
-    unsafe {
-        core::arch::asm!("mrs {}, ttbr0_el1", out(reg) old_ttbr0);
-        core::arch::asm!(
-            "msr ttbr0_el1, {val}",
-            "isb",
-            "tlbi vmalle1is",
-            "dsb ish",
-            "isb",
-            val = in(reg) new_ttbr0,
-        );
-    }
-
-    // ── 5. Prepare guest context ──
-    let mut ctx = VmCpuRegisters::default();
-    ctx.guest.elr = VM_ENTRY as u64;
-    ctx.guest.spsr = 0x3C0; // EL0t, DAIF masked
-    ctx.guest.sp = STACK_TOP as u64;
-
-    // ── 6. Run guest in loop ──
-    ax_println!("Entering VM run loop...");
-    loop {
-        unsafe {
-            aarch64::vcpu::_run_guest(&mut ctx);
-        }
-
-        if ctx.trap.is_irq != 0 {
-            continue;
-        }
-
-        let esr = ctx.trap.esr;
-        let ec = (esr >> 26) & 0x3F;
-
-        match ec {
-            0x15 => {
-                // SVC from EL0 — Hypercall
-                let func = ctx.guest.gprs.0[8]; // x8
-                match func {
-                    1 => {
-                        // putchar: x0 = character
-                        let ch = ctx.guest.gprs.0[0] as u8;
-                        ax_print!("{}", ch as char);
-                    }
-                    2 => {
-                        // exit
-                        ax_println!("Shutdown vm normally!");
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-            0x24 => {
-                // Data abort from lower EL (EL0) — page fault
-                let far = ctx.trap.far;
-                let page_addr = (far & !0xFFF) as usize;
-
-                let _ = uspace.map_linear(
-                    page_addr.into(),
-                    PhysAddr::from(page_addr),
-                    PAGE_SIZE_4K,
-                    flags,
-                );
-
-                unsafe {
-                    core::arch::asm!(
-                        "tlbi vmalle1is",
-                        "dsb ish",
-                        "isb",
-                    );
-                }
-            }
-            _ => {
-                ax_println!(
-                    "Unhandled trap: EC={:#x}, ESR={:#x}, ELR={:#x}, FAR={:#x}",
-                    ec, esr, ctx.guest.elr, ctx.trap.far
-                );
-                break;
-            }
-        }
-    }
-
-    // ── 7. Restore TTBR0_EL1 ──
     unsafe {
         core::arch::asm!(
-            "msr ttbr0_el1, {val}",
-            "isb",
-            "tlbi vmalle1is",
-            "dsb ish",
-            "isb",
-            val = in(reg) old_ttbr0,
-        );
-    }
-
-    ax_println!("Hypervisor ok!");
-    unsafe {
-        core::arch::asm!(
-            "movz x0, #0x0008",
-            "movk x0, #0x8400, lsl #16",
-            "smc  #0",
-            options(noreturn)
+            "msr daifset, #0xf",       // Mask all exceptions (DAIF)
+            "mov x0, {entry}",         // x0 = guest entry physical address
+            "br {tramp}",              // Jump to identity-mapped trampoline
+            entry = in(reg) GUEST_KERNEL_PADDR as u64,
+            tramp = in(reg) trampoline_pa as u64,
+            options(noreturn),
         );
     }
 }

@@ -102,8 +102,8 @@ fn install_payload_config(root: &Path, arch: &str) {
 
 /// Build the guest payload (gkernel) for the target architecture.
 ///
-/// For riscv64: full ArceOS application with multitasking (u_6_0 style).
-/// For aarch64/x86_64: bare-metal guest with hypercall I/O.
+/// For riscv64/aarch64: full ArceOS application with multitasking (u_6_0 style).
+/// For x86_64: bare-metal guest with hypercall I/O.
 fn build_payload(root: &Path, info: &ArchInfo, arch: &str) -> PathBuf {
     let payload_dir = root.join("payload").join("gkernel");
     let manifest = payload_dir.join("Cargo.toml");
@@ -112,8 +112,8 @@ fn build_payload(root: &Path, info: &ArchInfo, arch: &str) -> PathBuf {
 
     let mut cmd = Command::new("cargo");
 
-    // For riscv64: full ArceOS guest via axstd feature.
-    if arch == "riscv64" {
+    // For riscv64/aarch64: full ArceOS guest via axstd feature.
+    if arch == "riscv64" || arch == "aarch64" {
         let axconfig_path = payload_dir.join(".axconfig.toml");
         println!(
             "Setting AX_CONFIG_PATH={} for payload build",
@@ -131,8 +131,8 @@ fn build_payload(root: &Path, info: &ArchInfo, arch: &str) -> PathBuf {
         info.target.to_string(),
     ];
 
-    // Only riscv64 uses the axstd feature (full ArceOS guest with multitasking)
-    if arch == "riscv64" {
+    // riscv64 and aarch64 use axstd (full ArceOS guest with multitasking)
+    if arch == "riscv64" || arch == "aarch64" {
         build_args.push("--features".into());
         build_args.push("axstd".into());
     }
