@@ -1,6 +1,6 @@
 [package]
 name = "arceos-guestvdev"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 authors = ["Lei Shi <shi_lei@massclouds.com>", "Yu Chen <yuchen@tsinghua.edu.cn>"]
 description = "ArceOS Guest Virtual Device (Hypervisor): runs a guest OS with virtual device support (timer, console, NPF passthrough) — RISC-V H-extension, ARM AArch64 EL2, and AMD SVM"
