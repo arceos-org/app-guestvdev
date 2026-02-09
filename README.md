@@ -2,7 +2,7 @@
 
 A standalone hypervisor application running on [ArceOS](https://github.com/arceos-org/arceos) unikernel, with all dependencies sourced from [crates.io](https://crates.io). Implements guest virtual device support with **timer virtualization**, **console I/O forwarding**, and **nested page fault (NPF) passthrough** across three architectures.
 
-This crate is derived from the [h_3_0](https://github.com/arceos-org/arceos/tree/main/tour/h_3_0) tutorial crate in the ArceOS ecosystem, extending it to support multiple processor architectures. The h_3_0 crate runs [u_6_0](https://github.com/arceos-org/arceos/tree/main/tour/u_6_0) (a preemptive multi-tasking demo) as the guest OS.
+This crate is derived from the ArceOS hypervisor tutorial in the [ArceOS](https://github.com/arceos-org/arceos) ecosystem, extending it to support multiple processor architectures. The guest runs a preemptive multi-tasking demo as the guest OS.
 
 ## What It Does
 
@@ -14,11 +14,11 @@ The hypervisor (`arceos-guestvdev`) performs the following:
 4. **Virtualizes timer device** for guest preemptive scheduling (RISC-V: SBI SetTimer + hvip injection)
 5. **Forwards console I/O** via SBI/SVC/VMMCALL hypercalls
 6. **Handles nested page faults** with MMIO passthrough mapping
-7. **Demonstrates the h_3_0 control flow**: loop → guest entry → VM exit → handle → repeat
+7. **Demonstrates the VM run loop control flow**: loop → guest entry → VM exit → handle → repeat
 
 The guest kernel (`gkernel`) behavior varies by architecture:
 
-- **RISC-V 64**: Full ArceOS multi-tasking demo (u_6_0 style) with CFS scheduler and preemptive scheduling. Two worker threads communicate via a shared queue.
+- **RISC-V 64**: Full ArceOS multi-tasking demo with CFS scheduler and preemptive scheduling. Two worker threads communicate via a shared queue.
 - **AArch64**: Bare-metal EL0 program that tests virtual device interaction (console I/O via SVC, PFlash read via NPF).
 - **x86_64**: Bare-metal long-mode program that tests virtual device interaction (console I/O via VMMCALL, PFlash read via NPF).
 
@@ -36,7 +36,7 @@ The guest kernel (`gkernel`) behavior varies by architecture:
 
 > **Note on x86_64 AMD SVM**: The hypervisor uses VMRUN/VMEXIT with hardware Nested Page Tables (NPT). Guest GPRs (RCX–R15) are saved/restored by software via an `SvmGuestGprs` structure. PFlash is emulated in software.
 
-## Control Flow (h_3_0 Compatible)
+## Control Flow
 
 ```
 Hypervisor starts
@@ -71,9 +71,9 @@ Hypervisor starts
 
 | Crate | Role | Description |
 |---|---|---|
-| **arceos-guestvdev** (this) | Hypervisor | Runs guest with virtual device support (like h_3_0) |
-| [arceos-guestaspace](https://crates.io/crates/arceos-guestaspace) | Hypervisor | Runs guest with NPF handling (like h_2_0) |
-| [arceos-guestmode](https://crates.io/crates/arceos-guestmode) | Hypervisor | Runs minimal guest, single VM exit (like h_1_0) |
+| **arceos-guestvdev** (this) | Hypervisor | Runs guest with virtual device support |
+| [arceos-guestaspace](https://crates.io/crates/arceos-guestaspace) | Hypervisor | Runs guest with NPF handling |
+| [arceos-guestmode](https://crates.io/crates/arceos-guestmode) | Hypervisor | Runs minimal guest, single VM exit |
 
 ## Prerequisites
 
@@ -223,7 +223,7 @@ app-guestvdev/
 │   ├── aarch64.toml           # Platform config for aarch64-qemu-virt
 │   └── x86_64.toml            # Platform config for x86-pc
 ├── src/
-│   ├── main.rs                # Hypervisor entry: h_3_0 style VM exit handling
+│   ├── main.rs                # Hypervisor entry: VM exit handling loop
 │   ├── loader.rs              # Guest binary loader (FAT32 → address space)
 │   ├── vcpu.rs                # RISC-V vCPU context (registers, guest.S)
 │   ├── guest.S                # RISC-V guest entry/exit assembly
