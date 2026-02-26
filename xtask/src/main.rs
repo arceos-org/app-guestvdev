@@ -106,7 +106,7 @@ fn install_payload_config(root: &Path, arch: &str) {
 /// All architectures: full ArceOS application with multitasking (u_6_0 style).
 fn build_payload(root: &Path, info: &ArchInfo, arch: &str) -> PathBuf {
     let payload_dir = root.join("payload").join("gkernel");
-    let manifest = payload_dir.join("Cargo.toml");
+    let manifest = root.join("Cargo.toml");
 
     println!("Building payload (gkernel) for {arch} ...");
 
@@ -130,11 +130,14 @@ fn build_payload(root: &Path, info: &ArchInfo, arch: &str) -> PathBuf {
         manifest.to_str().unwrap().to_string(),
         "--target".into(),
         info.target.to_string(),
+        "--bin".into(),
+        "gkernel".into(),
     ];
 
     // All architectures use axstd (full ArceOS guest with multitasking)
+    // Always add guest-kernel feature
     build_args.push("--features".into());
-    build_args.push("axstd".into());
+    build_args.push("guest-kernel".into());
 
     let status = cmd
         .args(&build_args)
@@ -149,7 +152,7 @@ fn build_payload(root: &Path, info: &ArchInfo, arch: &str) -> PathBuf {
         process::exit(status.code().unwrap_or(1));
     }
 
-    let payload_elf = payload_dir
+    let payload_elf = root
         .join("target")
         .join(info.target)
         .join("release")
@@ -297,7 +300,7 @@ fn do_build(root: &Path, info: &ArchInfo) {
             "--target",
             info.target,
             "--features",
-            "axstd",
+            "hypervisor",
             "--manifest-path",
             manifest.to_str().unwrap(),
         ])

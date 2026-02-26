@@ -113,6 +113,18 @@ fn main() {
     }
 }
 
+#[cfg(not(feature = "axstd"))]
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    loop {}
+}
+
+#[cfg(not(feature = "axstd"))]
+#[unsafe(no_mangle)]
+extern "C" fn _start() -> ! {
+    loop {}
+}
+
 // ══════════════════════════════════════════════════════════════
 //  AArch64 — Bare-metal EL0 guest (fallback when axstd is NOT enabled)
 //

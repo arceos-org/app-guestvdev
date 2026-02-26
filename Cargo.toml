@@ -1,6 +1,6 @@
 [package]
 name = "arceos-guestvdev"
-version = "0.4.4"
+version = "0.4.5"
 edition = "2024"
 authors = ["Lei Shi <shi_lei@massclouds.com>", "Yu Chen <yuchen@tsinghua.edu.cn>"]
 description = "ArceOS Guest Virtual Device (Hypervisor): runs a guest OS with virtual device support (timer, console, NPF passthrough) — RISC-V H-extension, ARM AArch64 EL2, and AMD SVM"
@@ -13,10 +13,7 @@ include = [
     "src/**",
     "build.rs",
     "configs/**",
-    "payload/gkernel/Cargo.toml",
     "payload/gkernel/src/**",
-    "payload/gkernel/build.rs",
-    "payload/gkernel/.cargo/**",
     "payload/gkernel/configs/**",
     "payload/gkernel/linker-*.ld",
     "xtask/src/**",
@@ -28,11 +25,14 @@ include = [
 
 [features]
 default = []
-axstd = [
-    "dep:axstd", "dep:axfeat", "dep:axfs", "dep:axio",
+axstd = ["dep:axstd"]
+guest-kernel = ["axstd", "axstd/multitask", "axstd/sched-cfs"]
+hypervisor = [
+    "axstd", "dep:axfeat", "dep:axfs", "dep:axio",
     "dep:axmm", "dep:axhal", "dep:axsync", "dep:axtask", "dep:axlog",
     "dep:axerrno", "dep:memory_addr",
     "dep:memoffset",
+    "axstd/multitask", "axstd/sched-cfs",
 ]
 xtask = ["dep:clap", "dep:fatfs"]
 
@@ -41,9 +41,14 @@ name = "xtask"
 path = "xtask/src/main.rs"
 required-features = ["xtask"]
 
+[[bin]]
+name = "gkernel"
+path = "payload/gkernel/src/main.rs"
+required-features = ["guest-kernel"]
+
 [dependencies]
 # ─── ArceOS crates (common, all architectures) ───
-axstd = { version = "0.2.2-preview.1", features = ["defplat", "alloc", "paging", "multitask", "sched-cfs"], optional = true }
+axstd = { version = "0.2.2-preview.1", features = ["defplat", "alloc", "paging"], optional = true }
 axfeat = { version = "0.2.2-preview.1", features = ["fs", "fs-fat"], optional = true }
 axfs = { version = "0.2.2-preview.1", features = ["fat"], optional = true }
 axio = { version = "0.3.0-pre.1", optional = true }
@@ -68,3 +73,7 @@ sbi-rt = { version = "0.0.2", features = ["integer-impls", "legacy"] }
 tock-registers = { version = "0.8.1" }
 
 [profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
