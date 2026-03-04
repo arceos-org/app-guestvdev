@@ -1,8 +1,6 @@
-use alloc::sync::Arc;
 use axfs::ROOT_FS_CONTEXT;
-use axhal::paging::{MappingFlags, PageSize};
+use axhal::paging::MappingFlags;
 use axhal::mem::phys_to_virt;
-use axmm::backend::{Backend, SharedPages};
 use axmm::AddrSpace;
 use memory_addr::PAGE_SIZE_4K;
 use crate::VM_ENTRY;
@@ -10,7 +8,7 @@ use crate::VM_ENTRY;
 /// Load a guest binary from the filesystem into the given address space.
 ///
 /// Supports binaries of any size (multi-page loading).
-/// Each page is allocated via SharedPages and mapped at VM_ENTRY + offset.
+/// Each page is allocated via map_alloc and mapped at VM_ENTRY + offset.
 pub fn load_vm_image(fname: &str, uspace: &mut AddrSpace) -> axio::Result<()> {
     ax_println!("app: {}", fname);
     let ctx = ROOT_FS_CONTEXT.get().expect("Root FS not initialized");
@@ -31,38 +29,28 @@ pub fn load_vm_image(fname: &str, uspace: &mut AddrSpace) -> axio::Result<()> {
 
         let va = VM_ENTRY + page_offset;
 
-        // Allocate a fresh page and map it
-        let pages = Arc::new(
-            SharedPages::new(PAGE_SIZE_4K, PageSize::Size4K)
-                .map_err(|_| axio::Error::NoMemory)?,
-        );
+        // Map with eager allocation and copy data
         uspace
-            .map(
+            .map_alloc(
                 va.into(),
                 PAGE_SIZE_4K,
                 flags,
-                true,
-                Backend::new_shared(va.into(), pages),
+                true, // populate=true: allocate immediately
             )
             .map_err(|_| axio::Error::NoMemory)?;
 
-        // Query the physical address and copy data
-        let (paddr, _, _) = uspace
-            .page_table()
-            .query(va.into())
-            .unwrap_or_else(|_| panic!("Mapping failed for segment: {:#x}", va));
-
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                buf.as_ptr(),
-                phys_to_virt(paddr).as_mut_ptr(),
-                n,
-            );
-        }
+        // Write data to the address space
+        uspace
+            .write((VM_ENTRY + page_offset).into(), &buf[..n])
+            .map_err(|_| axio::Error::NoMemory)?;
 
         // AArch64: flush D-cache per page so I-cache sees fresh data
         #[cfg(target_arch = "aarch64")]
         unsafe {
+            let (paddr, _, _) = uspace
+                .page_table()
+                .query(va.into())
+                .unwrap_or_else(|_| panic!("Mapping failed for segment: {:#x}", va));
             let cache_va = phys_to_virt(paddr).as_usize();
             let mut off = 0usize;
             while off < PAGE_SIZE_4K {

@@ -118,7 +118,6 @@ fn main() {
 
 #[cfg(all(feature = "axstd", target_arch = "riscv64"))]
 fn riscv64_main() {
-    use alloc::sync::Arc;
     use vcpu::VmCpuRegisters;
     use riscv::register::scause;
     use csrs::defs::hstatus;
@@ -127,8 +126,7 @@ fn riscv64_main() {
     use csrs::{RiscvCsrTrait, CSR};
     use vcpu::_run_guest;
     use axhal::mem::PhysAddr;
-    use axhal::paging::{MappingFlags, PageSize};
-    use axmm::backend::{Backend, SharedPages};
+    use axhal::paging::MappingFlags;
     use memory_addr::{va, PAGE_SIZE_4K};
 
     ax_println!("Starting virtualization...");
@@ -172,9 +170,9 @@ fn riscv64_main() {
     }
 
     // ════════════════════════════════════════════════════
-    //  Step 1: Create guest address space (h_3_0: AddrSpace::new_empty)
+    //  Step 1: Create guest address space
     // ════════════════════════════════════════════════════
-    let mut uspace = axmm::AddrSpace::new_empty(va!(0x0), 0x7fff_ffff_f000).unwrap();
+    let mut uspace = axmm::new_user_aspace(va!(0x0), 0x7fff_ffff_f000).unwrap();
 
     let flags = MappingFlags::READ | MappingFlags::WRITE
         | MappingFlags::EXECUTE | MappingFlags::USER;
@@ -182,24 +180,18 @@ fn riscv64_main() {
     // ════════════════════════════════════════════════════
     //  Step 2: Pre-allocate guest physical RAM
     //
-    //  h_3_0: map_alloc(0x8000_0000, 0x100_0000, flags, true)
     //  Pre-allocate 16MB at 0x8000_0000 to avoid NPF during guest boot.
     // ════════════════════════════════════════════════════
     const PHY_MEM_START: usize = 0x8000_0000;
     const PHY_MEM_SIZE: usize = 0x100_0000; // 16 MB
 
     ax_println!("Pre-allocating {} MB guest RAM at {:#x}...", PHY_MEM_SIZE / (1024 * 1024), PHY_MEM_START);
-    let pages = Arc::new(
-        SharedPages::new(PHY_MEM_SIZE, PageSize::Size4K)
-            .expect("alloc guest RAM pages"),
-    );
     uspace
-        .map(
+        .map_alloc(
             PHY_MEM_START.into(),
             PHY_MEM_SIZE,
             flags,
-            true,
-            Backend::new_shared(PHY_MEM_START.into(), pages),
+            true, // populate=true: allocate immediately
         )
         .expect("map guest RAM");
 
@@ -585,7 +577,7 @@ fn aarch64_main() {
     // flag would set PXN (Privileged eXecute Never), blocking EL1 execution.
     let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE;
 
-    let mut identity = axmm::AddrSpace::new_empty(va!(0x0), 0x4800_0000).unwrap();
+    let mut identity = axmm::new_user_aspace(va!(0x0), 0x4800_0000).unwrap();
     identity.map_linear(
         trampoline_page_pa.into(),
         PhysAddr::from(trampoline_page_pa),
@@ -659,13 +651,11 @@ fn aarch64_main() {
 #[cfg(all(feature = "axstd", target_arch = "x86_64"))]
 fn x86_64_main() {
     use alloc::boxed::Box;
-    use alloc::sync::Arc;
     use x86_64_svm::vmcb::*;
     use x86_64_svm::svm::*;
     use memory_addr::va;
     use axhal::mem::{phys_to_virt, PhysAddr};
-    use axhal::paging::{MappingFlags, PageSize};
-    use axmm::backend::{Backend, SharedPages};
+    use axhal::paging::MappingFlags;
     use memory_addr::PAGE_SIZE_4K;
 
     ax_println!("Starting virtualization...");
@@ -714,7 +704,7 @@ fn x86_64_main() {
     let msrpm_pa = virt_to_phys_ptr(&msrpm.0[0]);
 
     // ── 5. Create NPT and pre-allocate guest RAM ──
-    let mut npt = axmm::AddrSpace::new_empty(va!(0x0), 0x1_0000_0000).unwrap();
+    let mut npt = axmm::new_user_aspace(va!(0x0), 0x1_0000_0000).unwrap();
 
     let flags = MappingFlags::READ | MappingFlags::WRITE
         | MappingFlags::EXECUTE | MappingFlags::USER;
@@ -722,16 +712,11 @@ fn x86_64_main() {
     // Pre-allocate 32MB of guest RAM (matching guest config phys-memory-size)
     const GUEST_RAM_SIZE: usize = 0x200_0000; // 32MB
     ax_println!("Pre-allocating {} MB guest RAM at GPA 0x0...", GUEST_RAM_SIZE / (1024 * 1024));
-    let ram_pages = Arc::new(
-        SharedPages::new(GUEST_RAM_SIZE, PageSize::Size4K)
-            .expect("alloc guest RAM"),
-    );
-    npt.map(
+    npt.map_alloc(
         0x0usize.into(),
         GUEST_RAM_SIZE,
         flags,
-        true,
-        Backend::new_shared(0x0usize.into(), ram_pages),
+        true, // populate=true: allocate immediately
     ).expect("map guest RAM");
 
     // Map APIC MMIO (GPA 0xFEE00000 → HPA 0xFEE00000, identity)
@@ -971,16 +956,11 @@ fn x86_64_main() {
                 // we pre-mapped them above. Any other NPF is handled by
                 // allocating zeroed pages — this allows PCI probing to
                 // read all-zeros (no devices), preventing VirtIO conflicts.
-                let pages = Arc::new(
-                    SharedPages::new(PAGE_SIZE_4K, PageSize::Size4K)
-                        .expect("alloc page for NPF"),
-                );
-                let _ = npt.map(
+                let _ = npt.map_alloc(
                     page_addr.into(),
                     PAGE_SIZE_4K,
                     flags,
-                    true,
-                    Backend::new_shared(page_addr.into(), pages),
+                    true, // populate=true: allocate immediately
                 );
             }
             VMEXIT_MSR => {
