@@ -7,14 +7,14 @@
 
 // ── VMCB Control Area offsets (0x000 – 0x3FF) ───────────────────
 // The intercept fields use 16-bit (2-byte) widths for CR/DR:
-pub const CTRL_INTERCEPT_CR_READS: usize = 0x000;  // u16
-pub const CTRL_INTERCEPT_CR_WRITES: usize = 0x002;  // u16
-pub const CTRL_INTERCEPT_DR_READS: usize = 0x004;   // u16
-pub const CTRL_INTERCEPT_DR_WRITES: usize = 0x006;  // u16
-pub const CTRL_INTERCEPT_EXCEPTIONS: usize = 0x008;  // u32
-pub const CTRL_INTERCEPT_MISC1: usize = 0x00C;      // u32 (INTR, NMI, CPUID, HLT, …)
-pub const CTRL_INTERCEPT_MISC2: usize = 0x010;      // u32 (VMRUN[0], VMMCALL[1], …)
-pub const CTRL_INTERCEPT_MISC3: usize = 0x014;      // u32 (XSETBV, …)
+pub const CTRL_INTERCEPT_CR_READS: usize = 0x000; // u16
+pub const CTRL_INTERCEPT_CR_WRITES: usize = 0x002; // u16
+pub const CTRL_INTERCEPT_DR_READS: usize = 0x004; // u16
+pub const CTRL_INTERCEPT_DR_WRITES: usize = 0x006; // u16
+pub const CTRL_INTERCEPT_EXCEPTIONS: usize = 0x008; // u32
+pub const CTRL_INTERCEPT_MISC1: usize = 0x00C; // u32 (INTR, NMI, CPUID, HLT, …)
+pub const CTRL_INTERCEPT_MISC2: usize = 0x010; // u32 (VMRUN[0], VMMCALL[1], …)
+pub const CTRL_INTERCEPT_MISC3: usize = 0x014; // u32 (XSETBV, …)
 pub const CTRL_IOPM_BASE: usize = 0x040;
 pub const CTRL_MSRPM_BASE: usize = 0x048;
 pub const CTRL_GUEST_ASID: usize = 0x058;

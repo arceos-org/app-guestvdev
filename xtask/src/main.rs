@@ -6,7 +6,10 @@ use std::time::Duration;
 
 /// ArceOS Guest Virtual Device — multi-architecture build & run tool
 #[derive(Parser)]
-#[command(name = "xtask", about = "Build and run arceos-guestvdev on different architectures")]
+#[command(
+    name = "xtask",
+    about = "Build and run arceos-guestvdev on different architectures"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
@@ -139,13 +142,10 @@ fn build_payload(root: &Path, info: &ArchInfo, arch: &str) -> PathBuf {
     build_args.push("--features".into());
     build_args.push("guest-kernel".into());
 
-    let status = cmd
-        .args(&build_args)
-        .status()
-        .unwrap_or_else(|e| {
-            eprintln!("Error: failed to run cargo build for payload: {}", e);
-            process::exit(1);
-        });
+    let status = cmd.args(&build_args).status().unwrap_or_else(|e| {
+        eprintln!("Error: failed to run cargo build for payload: {}", e);
+        process::exit(1);
+    });
 
     if !status.success() {
         eprintln!("Error: payload compilation failed");
@@ -408,13 +408,10 @@ fn do_run_qemu(arch: &str, elf: &Path, bin: &Path, disk: &Path, pflash: Option<&
     println!("Running: {} {}", qemu, args.join(" "));
 
     let timeout_secs = 20u64;
-    let mut child = Command::new(&qemu)
-        .args(&args)
-        .spawn()
-        .unwrap_or_else(|e| {
-            eprintln!("Error: failed to run {}: {}", qemu, e);
-            process::exit(1);
-        });
+    let mut child = Command::new(&qemu).args(&args).spawn().unwrap_or_else(|e| {
+        eprintln!("Error: failed to run {}: {}", qemu, e);
+        process::exit(1);
+    });
 
     // Poll child every 200ms until it exits or timeout is reached.
     let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
@@ -430,10 +427,7 @@ fn do_run_qemu(arch: &str, elf: &Path, bin: &Path, disk: &Path, pflash: Option<&
             Ok(None) => {
                 // Still running
                 if std::time::Instant::now() >= deadline {
-                    eprintln!(
-                        "\nQEMU did not exit within {}s, killing...",
-                        timeout_secs
-                    );
+                    eprintln!("\nQEMU did not exit within {}s, killing...", timeout_secs);
                     let _ = child.kill();
                     let _ = child.wait();
                     return;

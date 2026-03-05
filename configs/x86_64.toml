@@ -44,7 +44,7 @@ virtio-mmio-ranges = [] # [(uint, uint)]
 # Stack size on bootstrapping. (256K)
 boot-stack-size = 0x40000 # uint
 # Number of CPUs.
-cpu-num = 1 # uint
+max-cpu-num = 1 # uint
 # Kernel address space base.
 kernel-aspace-base = "0xffff_8000_0000_0000" # uint
 # Kernel address space size.

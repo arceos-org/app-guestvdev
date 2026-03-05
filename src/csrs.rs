@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use defs::*;
-use tock_registers::interfaces::{Readable, Writeable};
 use tock_registers::RegisterLongName;
+use tock_registers::interfaces::{Readable, Writeable};
 
 /// Define each registers of hypervisor using.
 pub struct CSR {

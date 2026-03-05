@@ -1,0 +1,30 @@
+name: CI
+
+on:
+    push:
+        branches: [main, dev, master]
+    pull_request:
+        branches: [main, dev, master]
+
+jobs:
+    test:
+        runs-on: ubuntu-latest
+        container: ghcr.io/chyyuu/tangram-crates
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+
+            - name: Verify tools
+              run: |
+                  echo "=== Checking Rust version ==="
+                  rustc --version --verbose
+                  echo ""
+                  echo "=== Checking QEMU version ==="
+                  qemu-system-riscv64 --version
+                  qemu-system-x86_64 --version
+                  qemu-system-aarch64 --version
+                  echo ""
+
+            - name: Run tests
+              run: ./scripts/test.sh

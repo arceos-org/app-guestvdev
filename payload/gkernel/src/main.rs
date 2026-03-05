@@ -27,11 +27,25 @@
 //  - Preemptive scheduling (CFS scheduler with timer interrupts)
 // ══════════════════════════════════════════════════════════════
 
-#[cfg(all(feature = "axstd", any(target_arch = "riscv64", target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(all(
+    feature = "axstd",
+    any(
+        target_arch = "riscv64",
+        target_arch = "aarch64",
+        target_arch = "x86_64"
+    )
+))]
 #[macro_use]
 extern crate axstd as std;
 
-#[cfg(all(feature = "axstd", any(target_arch = "riscv64", target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(all(
+    feature = "axstd",
+    any(
+        target_arch = "riscv64",
+        target_arch = "aarch64",
+        target_arch = "x86_64"
+    )
+))]
 mod multitask_guest {
     use std::collections::VecDeque;
     use std::os::arceos::modules::axsync::spin::SpinNoIrq;
@@ -49,8 +63,12 @@ mod multitask_guest {
         let worker1 = thread::spawn(move || {
             println!("worker1 ... {:?}", thread::current().id());
             for i in 0..=LOOP_NUM {
+                // Minimize lock hold time to avoid preemption issues
+                {
+                    q1.lock().push_back(i);
+                }
+                // Print outside of lock to reduce critical section
                 println!("worker1 [{i}]");
-                q1.lock().push_back(i);
             }
             println!("worker1 ok!");
         });
@@ -58,7 +76,9 @@ mod multitask_guest {
         let worker2 = thread::spawn(move || {
             println!("worker2 ... {:?}", thread::current().id());
             loop {
-                if let Some(num) = q2.lock().pop_front() {
+                // Minimize lock hold time
+                let num = q2.lock().pop_front();
+                if let Some(num) = num {
                     println!("worker2 [{num}]");
                     if num == LOOP_NUM {
                         break;
@@ -80,7 +100,14 @@ mod multitask_guest {
     }
 }
 
-#[cfg(all(feature = "axstd", any(target_arch = "riscv64", target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(all(
+    feature = "axstd",
+    any(
+        target_arch = "riscv64",
+        target_arch = "aarch64",
+        target_arch = "x86_64"
+    )
+))]
 #[unsafe(no_mangle)]
 fn main() {
     multitask_guest::run();
@@ -95,7 +122,7 @@ fn main() {
     unsafe {
         core::arch::asm!(
             "movz x0, #0x0008",
-            "movk x0, #0x8400, lsl #16",   // x0 = 0x84000008 (PSCI_SYSTEM_OFF)
+            "movk x0, #0x8400, lsl #16", // x0 = 0x84000008 (PSCI_SYSTEM_OFF)
             "smc  #0",
             options(noreturn)
         );

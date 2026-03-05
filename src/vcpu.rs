@@ -1,8 +1,8 @@
 use core::arch::global_asm;
 use core::mem::size_of;
 
-use memoffset::offset_of;
 use super::regs::{GeneralPurposeRegisters, GprIndex};
+use memoffset::offset_of;
 
 /// Hypervisor GPR and CSR state which must be saved/restored when entering/exiting virtualization.
 #[derive(Default)]
