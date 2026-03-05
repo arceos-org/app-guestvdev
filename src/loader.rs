@@ -1,9 +1,9 @@
+use crate::VM_ENTRY;
 use axfs::ROOT_FS_CONTEXT;
-use axhal::paging::MappingFlags;
 use axhal::mem::phys_to_virt;
+use axhal::paging::MappingFlags;
 use axmm::AddrSpace;
 use memory_addr::PAGE_SIZE_4K;
-use crate::VM_ENTRY;
 
 /// Load a guest binary from the filesystem into the given address space.
 ///
@@ -14,7 +14,8 @@ pub fn load_vm_image(fname: &str, uspace: &mut AddrSpace) -> axio::Result<()> {
     let ctx = ROOT_FS_CONTEXT.get().expect("Root FS not initialized");
     let file = axfs::File::open(ctx, fname).map_err(|_| axio::Error::NotFound)?;
 
-    let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE | MappingFlags::USER;
+    let flags =
+        MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE | MappingFlags::USER;
 
     let mut page_offset = 0usize;
     let mut total_bytes = 0usize;
@@ -82,7 +83,12 @@ pub fn load_vm_image(fname: &str, uspace: &mut AddrSpace) -> axio::Result<()> {
         .map(|(pa, _, _)| pa)
         .unwrap();
     ax_println!("paddr: PA:{:#x}", first_paddr);
-    ax_println!("Loaded {} bytes ({} pages) from {}", total_bytes, page_offset / PAGE_SIZE_4K, fname);
+    ax_println!(
+        "Loaded {} bytes ({} pages) from {}",
+        total_bytes,
+        page_offset / PAGE_SIZE_4K,
+        fname
+    );
 
     Ok(())
 }

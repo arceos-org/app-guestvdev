@@ -27,11 +27,25 @@
 //  - Preemptive scheduling (CFS scheduler with timer interrupts)
 // ══════════════════════════════════════════════════════════════
 
-#[cfg(all(feature = "axstd", any(target_arch = "riscv64", target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(all(
+    feature = "axstd",
+    any(
+        target_arch = "riscv64",
+        target_arch = "aarch64",
+        target_arch = "x86_64"
+    )
+))]
 #[macro_use]
 extern crate axstd as std;
 
-#[cfg(all(feature = "axstd", any(target_arch = "riscv64", target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(all(
+    feature = "axstd",
+    any(
+        target_arch = "riscv64",
+        target_arch = "aarch64",
+        target_arch = "x86_64"
+    )
+))]
 mod multitask_guest {
     use std::collections::VecDeque;
     use std::os::arceos::modules::axsync::spin::SpinNoIrq;
@@ -80,7 +94,14 @@ mod multitask_guest {
     }
 }
 
-#[cfg(all(feature = "axstd", any(target_arch = "riscv64", target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(all(
+    feature = "axstd",
+    any(
+        target_arch = "riscv64",
+        target_arch = "aarch64",
+        target_arch = "x86_64"
+    )
+))]
 #[unsafe(no_mangle)]
 fn main() {
     multitask_guest::run();
@@ -95,7 +116,7 @@ fn main() {
     unsafe {
         core::arch::asm!(
             "movz x0, #0x0008",
-            "movk x0, #0x8400, lsl #16",   // x0 = 0x84000008 (PSCI_SYSTEM_OFF)
+            "movk x0, #0x8400, lsl #16", // x0 = 0x84000008 (PSCI_SYSTEM_OFF)
             "smc  #0",
             options(noreturn)
         );

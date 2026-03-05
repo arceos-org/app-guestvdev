@@ -23,27 +23,39 @@ pub const EFER_SVME: u64 = 1 << 12;
 /// Field order matches the assembly offsets used in `_run_guest`.
 #[repr(C)]
 pub struct SvmGuestGprs {
-    pub rcx: u64,  // offset 0x00
-    pub rdx: u64,  // offset 0x08
-    pub rbx: u64,  // offset 0x10
-    pub rsi: u64,  // offset 0x18
-    pub rdi: u64,  // offset 0x20
-    pub rbp: u64,  // offset 0x28
-    pub r8:  u64,  // offset 0x30
-    pub r9:  u64,  // offset 0x38
-    pub r10: u64,  // offset 0x40
-    pub r11: u64,  // offset 0x48
-    pub r12: u64,  // offset 0x50
-    pub r13: u64,  // offset 0x58
-    pub r14: u64,  // offset 0x60
-    pub r15: u64,  // offset 0x68
+    pub rcx: u64, // offset 0x00
+    pub rdx: u64, // offset 0x08
+    pub rbx: u64, // offset 0x10
+    pub rsi: u64, // offset 0x18
+    pub rdi: u64, // offset 0x20
+    pub rbp: u64, // offset 0x28
+    pub r8: u64,  // offset 0x30
+    pub r9: u64,  // offset 0x38
+    pub r10: u64, // offset 0x40
+    pub r11: u64, // offset 0x48
+    pub r12: u64, // offset 0x50
+    pub r13: u64, // offset 0x58
+    pub r14: u64, // offset 0x60
+    pub r15: u64, // offset 0x68
 }
 
 impl SvmGuestGprs {
     pub const fn new() -> Self {
         Self {
-            rcx: 0, rdx: 0, rbx: 0, rsi: 0, rdi: 0, rbp: 0,
-            r8: 0, r9: 0, r10: 0, r11: 0, r12: 0, r13: 0, r14: 0, r15: 0,
+            rcx: 0,
+            rdx: 0,
+            rbx: 0,
+            rsi: 0,
+            rdi: 0,
+            rbp: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
         }
     }
 }
@@ -134,19 +146,15 @@ global_asm!(
     "push r13",
     "push r14",
     "push r15",
-
     // Save parameters we need after VMEXIT
-    "push rsi",         // [RSP+16] = host_vmcb_pa
-    "push rdx",         // [RSP+ 8] = gprs_ptr
-    "push rdi",         // [RSP+ 0] = guest_vmcb_pa
-
+    "push rsi", // [RSP+16] = host_vmcb_pa
+    "push rdx", // [RSP+ 8] = gprs_ptr
+    "push rdi", // [RSP+ 0] = guest_vmcb_pa
     // ── Disable interrupts ──
     "cli",
-
     // ── VMSAVE host FS/GS/TR/LDTR ──
-    "mov rax, rsi",     // RAX = host_vmcb_pa
+    "mov rax, rsi", // RAX = host_vmcb_pa
     "vmsave",
-
     // ── Load guest GPRs from save area ──
     // RDX still holds the gprs pointer (not yet clobbered)
     "mov rcx, [rdx + 0x00]",
@@ -161,14 +169,12 @@ global_asm!(
     "mov r13, [rdx + 0x58]",
     "mov r14, [rdx + 0x60]",
     "mov r15, [rdx + 0x68]",
-    "mov rdi, [rdx + 0x20]",    // guest RDI  — clobbers RDI param
-    "mov rdx, [rdx + 0x08]",    // guest RDX  — clobbers gprs ptr, LAST!
-
+    "mov rdi, [rdx + 0x20]", // guest RDI  — clobbers RDI param
+    "mov rdx, [rdx + 0x08]", // guest RDX  — clobbers gprs ptr, LAST!
     // ── Enter guest ──
     // RAX = guest_vmcb_pa from stack
     "mov rax, [rsp]",
     "vmrun",
-
     // ═══════════════════════════════════════════════════════════
     //  VMEXIT — host RSP restored by hardware.
     //
@@ -181,8 +187,7 @@ global_asm!(
 
     // Get gprs pointer: swap RDI with [RSP+8] (gprs_ptr).
     // This atomically saves guest RDI and loads gprs_ptr.
-    "xchg rdi, [rsp + 8]",     // RDI = gprs_ptr, [RSP+8] = guest RDI
-
+    "xchg rdi, [rsp + 8]", // RDI = gprs_ptr, [RSP+8] = guest RDI
     // ── Save guest GPRs to the save area ──
     "mov [rdi + 0x00], rcx",
     "mov [rdi + 0x08], rdx",
@@ -200,17 +205,13 @@ global_asm!(
     "mov [rdi + 0x58], r13",
     "mov [rdi + 0x60], r14",
     "mov [rdi + 0x68], r15",
-
     // ── VMLOAD host FS/GS/TR/LDTR ──
-    "mov rax, [rsp + 16]",     // RAX = host_vmcb_pa
+    "mov rax, [rsp + 16]", // RAX = host_vmcb_pa
     "vmload",
-
     // ── Re-enable interrupts ──
     "sti",
-
     // ── Clean up stack (pop the 3 saved parameters) ──
     "add rsp, 24",
-
     // ── Restore callee-saved host GPRs ──
     "pop r15",
     "pop r14",
