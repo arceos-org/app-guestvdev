@@ -10,4 +10,4 @@ default = []
 axstd = ["dep:axstd"]
 
 [dependencies]
-axstd = { version = "0.2.2-preview.1", features = ["defplat", "alloc", "paging", "multitask", "sched-cfs"], optional = true }
+axstd = { version = "=0.3.0-preview.1", features = ["defplat", "alloc", "paging", "multitask", "sched-cfs"], optional = true }

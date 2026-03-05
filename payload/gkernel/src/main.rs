@@ -63,8 +63,12 @@ mod multitask_guest {
         let worker1 = thread::spawn(move || {
             println!("worker1 ... {:?}", thread::current().id());
             for i in 0..=LOOP_NUM {
+                // Minimize lock hold time to avoid preemption issues
+                {
+                    q1.lock().push_back(i);
+                }
+                // Print outside of lock to reduce critical section
                 println!("worker1 [{i}]");
-                q1.lock().push_back(i);
             }
             println!("worker1 ok!");
         });
@@ -72,7 +76,9 @@ mod multitask_guest {
         let worker2 = thread::spawn(move || {
             println!("worker2 ... {:?}", thread::current().id());
             loop {
-                if let Some(num) = q2.lock().pop_front() {
+                // Minimize lock hold time
+                let num = q2.lock().pop_front();
+                if let Some(num) = num {
                     println!("worker2 [{num}]");
                     if num == LOOP_NUM {
                         break;
